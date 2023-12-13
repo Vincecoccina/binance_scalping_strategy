@@ -38,7 +38,5 @@ next-env.d.ts
 # robots.txt
 robots.txt
 
-# sitemaps
-sitemap-*.xml
-sitemap.xml
-certificates
+#python
+example.py
