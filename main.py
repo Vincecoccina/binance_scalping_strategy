@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import os
 from binance.client import Client
+from binance.exceptions import BinanceAPIException, BinanceOrderException
 from binance import ThreadedWebsocketManager
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -18,21 +19,26 @@ secret_key = os.getenv("SECRET_KEY_TEST")
 client = Client(api_key=api_key, api_secret=secret_key, tld='com', testnet=True)
 
 # symbol = 'TRXUSDT'
-symbol = 'XRPUSDT'
+symbol = 'RNDRUSDT'
+# symbol = 'XRPUSDT'
 # symbol = 'ETHUSDT'
 # symbol = 'BTCUSDT'
 # symbol = 'XMRUSDT'
-# symbol = 'BNBUSDT'
+#symbol = 'BNBUSDT'
 # symbol = 'LTCUSDT'
 # symbol = 'SOLUSDT'
 
+
 class ScalpingTrader():
     
-    def __init__(self, symbol, bar_length):
+    def __init__(self, symbol, bar_length, units):
         self.symbol = symbol
         self.bar_length = bar_length
         self.available_intervals = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]
-    
+        self.units = units
+        self.position = 0
+        self.trades = pd.DataFrame(columns=['Time', 'Type', 'OrderID', 'Price', 'Quantity','Total', 'Status'])
+
     def start_trading(self, historical_days):
         
         self.twm = ThreadedWebsocketManager()
@@ -50,7 +56,7 @@ class ScalpingTrader():
             past = str(now - timedelta(days = days))
 
             bars = client.get_historical_klines(symbol = symbol, interval = interval,
-                                                start_str=past, end_str=None, limit=1000)
+                                                start_str=past, end_str=None, limit=500)
             df = pd.DataFrame(bars)
             df["Date"] = pd.to_datetime(df.iloc[:,0], unit = "ms")
             df.columns = ["Open Time", "Open", "High", "Low", "Close", "Volume",
@@ -148,42 +154,92 @@ class ScalpingTrader():
         self.data = pd.concat([self.data, new_data])
         # Recalcule des indicateurs
         self.calculate_indicators()
+
     
-    def plot_data(self):
-        # Préparer les données de signal
-        achat_signals = self.data[self.data['TotalSignal'] == 2]
-        vente_signals = self.data[self.data['TotalSignal'] == 1]
+    def execute_trades(self):
+        for index, row in self.data.iterrows():
+            signal = row['TotalSignal']
 
-        # Créer le graphique à chandeliers
-        fig = go.Figure(data=[go.Candlestick(x=self.data.index,
-                                             open=self.data["Open"],
-                                             high=self.data["High"],
-                                             low=self.data["Low"],
-                                             close=self.data["Close"])])
-        # Ajouter des lignes pour les indicateurs
-        fig.add_trace(go.Scatter(x=self.data.index, y=self.data["VWAP"], mode="lines", name="VWAP", line=dict(color="blue")))
-        fig.add_trace(go.Scatter(x=self.data.index, y=self.data["Lower Band"], mode="lines", name="Lower Band", line=dict(color="crimson")))
-        fig.add_trace(go.Scatter(x=self.data.index, y=self.data["Upper Band"], mode="lines", name="Upper Band", line=dict(color="green")))
+            try:
+                if signal == 2:  # Signal d'achat
+                    # Vérifiez si vous n'avez pas déjà acheté
+                    if self.position == 0:
+                        order = client.create_order(symbol=self.symbol, side="BUY", type="MARKET", quantity=self.units)
+                        self.position = 1  # Mise à jour de la position
+                        print(f"Achat effectué à {index}: ", order)
+                        self.record_trade(order, 'BUY', index)
+                elif signal == 1:  # Signal de vente
+                    # Vérifiez si vous avez une position à vendre
+                    if self.position == 1:
+                        order = client.create_order(symbol=self.symbol, side="SELL", type="MARKET", quantity=self.units)
+                        self.position = 0  # Réinitialisation de la position
+                        print(f"Vente effectuée à {index}: ", order)
+                        self.record_trade(order, 'SELL', index)
+            except BinanceOrderException as e:
+                print(f"Erreur lors de la passation de l'ordre à {index}: {e}")
+    
+    def record_trade(self, order, type, time):
+        price = float(order['fills'][0]['price'])
+        quantity = float(order['fills'][0]['qty'])
+        new_trade = {
+            'Time': time,
+            'Type': type,
+            'OrderID': order['orderId'],
+            'Price': price,
+            'Quantity': quantity,
+            'Total': price * quantity,
+            'Status': order['status']
+        }
+        self.trades = self.trades._append(new_trade, ignore_index=True)
 
-        # Ajouter des marqueurs pour les signaux
-        fig.add_trace(go.Scatter(x=achat_signals.index, y=achat_signals['Close'],
-                                 mode='markers', marker=dict(color='green', size=10),
-                                 name='Signal Achat'))
-        fig.add_trace(go.Scatter(x=vente_signals.index, y=vente_signals['Close'],
-                                 mode='markers', marker=dict(color='red', size=10),
-                                 name='Signal Vente'))
+
+
+
+    
+    # def plot_data(self):
+    #     # Préparer les données de signal
+    #     achat_signals = self.data[self.data['TotalSignal'] == 2]
+    #     vente_signals = self.data[self.data['TotalSignal'] == 1]
+
+    #     # Créer le graphique à chandeliers
+    #     fig = go.Figure(data=[go.Candlestick(x=self.data.index,
+    #                                          open=self.data["Open"],
+    #                                          high=self.data["High"],
+    #                                          low=self.data["Low"],
+    #                                          close=self.data["Close"])])
+    #     # Ajouter des lignes pour les indicateurs
+    #     fig.add_trace(go.Scatter(x=self.data.index, y=self.data["VWAP"], mode="lines", name="VWAP", line=dict(color="blue")))
+    #     fig.add_trace(go.Scatter(x=self.data.index, y=self.data["Lower Band"], mode="lines", name="Lower Band", line=dict(color="crimson")))
+    #     fig.add_trace(go.Scatter(x=self.data.index, y=self.data["Upper Band"], mode="lines", name="Upper Band", line=dict(color="green")))
+
+    #     # Ajouter des marqueurs pour les signaux
+    #     fig.add_trace(go.Scatter(x=achat_signals.index, y=achat_signals['Close'],
+    #                              mode='markers', marker=dict(color='green', size=10),
+    #                              name='Signal Achat'))
+    #     fig.add_trace(go.Scatter(x=vente_signals.index, y=vente_signals['Close'],
+    #                              mode='markers', marker=dict(color='red', size=10),
+    #                              name='Signal Vente'))
         
-        # Afficher le graphique
-        fig.show()
+    #     # Afficher le graphique
+    #     fig.show()
 
-trader = ScalpingTrader(symbol=symbol, bar_length="5m")
+bar_length = "5m"
+return_thresh = 0
+volume_thresh = [-3, 3]
+units = 3
+
+
+trader = ScalpingTrader(symbol=symbol, bar_length=bar_length, units=units)
 trader.start_trading(historical_days = 2)
 
-run_time = 30 
-
-time.sleep(run_time)
+run_time = 60 
+start_time = time.time()
+while time.time() - start_time < run_time:
+    trader.execute_trades()
+    time.sleep(1)
 
 trader.twm.stop()
 filtered_data = trader.data[trader.data["TotalSignal"]!=0]
-print(trader.data)
-trader.plot_data()
+print(filtered_data)
+print(trader.trades)
+# trader.plot_data()
