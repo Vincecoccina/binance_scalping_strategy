@@ -18,8 +18,8 @@ secret_key = os.getenv("SECRET_KEY_TEST")
 # Initialisation de l'API Binance avec les clés API
 client = Client(api_key=api_key, api_secret=secret_key, tld='com', testnet=True)
 
-# symbol = 'TRXUSDT'
-symbol = 'RNDRUSDT'
+symbol = 'TRXUSDT'
+#symbol = 'RNDREUR'
 # symbol = 'XRPUSDT'
 # symbol = 'ETHUSDT'
 # symbol = 'BTCUSDT'
@@ -31,13 +31,18 @@ symbol = 'RNDRUSDT'
 
 class ScalpingTrader():
     
-    def __init__(self, symbol, bar_length, units):
+    def __init__(self, symbol, bar_length, units, stop_loss):
         self.symbol = symbol
         self.bar_length = bar_length
         self.available_intervals = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]
         self.units = units
         self.position = 0
-        self.trades = pd.DataFrame(columns=['Time', 'Type', 'OrderID', 'Price', 'Quantity','Total', 'Status'])
+        self.last_buy_time = None
+        self.last_buy_price = None
+        self.profit_target = 1.0
+        self.max_hold_time = 5
+        self.stop_loss = stop_loss
+        self.trades = pd.DataFrame(columns=['Time',"Symbol", 'Type', 'OrderID', 'Price', 'Quantity','Total', 'Status'])
 
     def start_trading(self, historical_days):
         
@@ -50,7 +55,6 @@ class ScalpingTrader():
             self.twm.start_kline_socket(callback = self.stream_candles,
                                         symbol = self.symbol, interval = self.bar_length)
             
-
     def get_most_recent(self, symbol, interval, days):
             now = datetime.utcnow()
             past = str(now - timedelta(days = days))
@@ -92,15 +96,32 @@ class ScalpingTrader():
         self.data['VWAPSignal'] = VWAPsignal
     
     def total_signal(self, l):
+        current_price = float(self.data["Close"].iloc[l])
+        
+
+        # Signal d'achat
         if (self.data["VWAPSignal"].iloc[l] == 2 and
-            self.data["Close"].iloc[l] <= self.data['Lower Band'].iloc[l] and
+            current_price <= self.data['Lower Band'].iloc[l] and
             self.data["RSI"].iloc[l] < 45):
+            self.last_buy_time = self.data.index[l]
+            self.last_buy_price = current_price
+            self.stop_loss = current_price * (1 - self.stop_loss / 100)  # Exemple de stop-loss à un certain pourcentage sous le prix d'achat
             return 2
-        if (self.data["VWAPSignal"].iloc[l] == 1 and
-            self.data["Close"].iloc[l] >= self.data['Upper Band'].iloc[l] and
-            self.data["RSI"].iloc[l] > 55):
+
+        # Signal de vente basé sur le profit
+        if self.last_buy_price and (current_price >= self.last_buy_price * (1 + self.profit_target / 100)):
+            self.last_buy_time = None
+            self.last_buy_price = None
             return 1
+
+        # Signal de vente basé sur le stop-loss
+        if self.last_buy_price and (current_price <= self.stop_loss):
+            self.last_buy_time = None
+            self.last_buy_price = None
+            return 1
+
         return 0
+
 
     def calculate_total_signal(self):
         TotSignal = [0]*len(self.data)
@@ -128,8 +149,7 @@ class ScalpingTrader():
         self.data["Lower Band"] = self.data["BBL_14_2.0"]
         self.calculate_vwap_signal()
         self.calculate_total_signal()
-        self.calculate_pointposbreak()
-     
+        self.calculate_pointposbreak()  
                     
     def stream_candles(self, msg):
         event_time = pd.to_datetime(msg["E"], unit = "ms")
@@ -155,7 +175,6 @@ class ScalpingTrader():
         # Recalcule des indicateurs
         self.calculate_indicators()
 
-    
     def execute_trades(self):
         for index, row in self.data.iterrows():
             signal = row['TotalSignal']
@@ -183,6 +202,7 @@ class ScalpingTrader():
         quantity = float(order['fills'][0]['qty'])
         new_trade = {
             'Time': time,
+            "Symbol": symbol,
             'Type': type,
             'OrderID': order['orderId'],
             'Price': price,
@@ -226,10 +246,10 @@ class ScalpingTrader():
 bar_length = "5m"
 return_thresh = 0
 volume_thresh = [-3, 3]
-units = 3
+units = 80
 
 
-trader = ScalpingTrader(symbol=symbol, bar_length=bar_length, units=units)
+trader = ScalpingTrader(symbol=symbol, bar_length=bar_length, units=units, stop_loss=5)
 trader.start_trading(historical_days = 2)
 
 run_time = 60 
@@ -241,5 +261,5 @@ while time.time() - start_time < run_time:
 trader.twm.stop()
 filtered_data = trader.data[trader.data["TotalSignal"]!=0]
 print(filtered_data)
-print(trader.trades)
+print(trader.trades[50:])
 # trader.plot_data()
